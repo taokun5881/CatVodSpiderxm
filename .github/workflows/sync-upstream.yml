@@ -2,43 +2,74 @@ name: Sync Upstream
 
 on:
   schedule:
-    - cron: "0 */6 * * *"   # 每6小时同步
+    - cron: "0 */6 * * *"
   workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  TARGET_BRANCH: main
+  UPSTREAM_REPO: https://github.com/ggrrttyyiii/CatVodSpider.git
+  UPSTREAM_BRANCH: main
+
+concurrency:
+  group: sync-upstream-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   sync:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout target branch
         uses: actions/checkout@v4
         with:
+          ref: ${{ env.TARGET_BRANCH }}
           fetch-depth: 0
 
-      - name: Git config
+      - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Add upstream
+      - name: Add upstream remote
         run: |
-          git remote add upstream https://github.com/ggrrttyyiii/CatVodSpider.git
-          git fetch upstream
+          git remote add upstream "$UPSTREAM_REPO" || git remote set-url upstream "$UPSTREAM_REPO"
+          git fetch --no-tags upstream "$UPSTREAM_BRANCH"
 
-      - name: Merge upstream
+      - name: Merge upstream and keep local workflows
+        shell: bash
         run: |
-          git checkout main
-          git merge upstream/main --no-edit || true
+          set -euo pipefail
 
-      - name: Protect workflows (关键)
-        run: |
-          git checkout HEAD -- .github/workflows || true
+          backup_dir="$RUNNER_TEMP/local-workflows"
+          mkdir -p "$backup_dir"
+          cp -a .github/workflows/. "$backup_dir/"
 
-      - name: Commit
-        run: |
-          git add .
-          git commit -m "sync: upstream update" || echo "no changes"
+          if ! git merge --no-commit --no-ff "upstream/$UPSTREAM_BRANCH"; then
+            git status --short
+            echo "::error::Upstream merge has conflicts. Resolve them manually, then rerun this workflow."
+            exit 1
+          fi
 
-      - name: Push
+          rm -rf .github/workflows
+          mkdir -p .github/workflows
+          cp -a "$backup_dir/." .github/workflows/
+          git add -A
+
+      - name: Commit synced changes
+        shell: bash
         run: |
-          git push origin main
+          set -euo pipefail
+
+          if [ -f .git/MERGE_HEAD ]; then
+            git commit --allow-empty -m "sync: upstream update"
+          elif ! git diff --quiet HEAD; then
+            git commit -m "sync: upstream update"
+          else
+            echo "No upstream changes to sync."
+          fi
+
+      - name: Push target branch
+        run: git push origin "HEAD:$TARGET_BRANCH"
